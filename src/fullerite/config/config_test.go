@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"encoding/json"
+
 	"github.com/Sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 )
@@ -50,12 +51,44 @@ var testGoodConfiguration = `{
 
 var testCollectorConfiguration = `{
 	"metricName": "TestMetric",
-	"interval": 10
+	"interval": %%COLLECTOR_INTERVAL%%
 }
 `
 
+var testGoodEnvvarConfiguration = `{
+		"prefix": "%%PREFIX%%",
+		"interval": 10,
+		"defaultDimensions": {
+				"application": "fullerite",
+				"this_should_interpolate": "%%THIS_SHOULD_INTERPOLATE%%",
+				"test_percent1": "%IS_NOT_AFFECTED",
+				"test_percent2": "%IS_NOT_AFFECTED%",
+				"test_percent3": "%%IS_NOT_AFFECTED%",
+				"test_percent4": "%%IS_ALSO_NOT_AFFECTED_BECAUSE_NOT_SET%%",
+				"test_percent4": "%%IS_ALSO_NOT_AFFECTED_BECAUSE_NOT_SET%%",
+				"test_short_does_not_work1": "asijwef%%TS1%%iwefwewef",
+				"test_short_does_not_work2": "asijwef%%TS_1%%iwefwewef",
+				"test_numeric_start_does_not_work": "%%1MISSISSIPPI%%",
+				"test_lowercase_does_not_work": "%%this_is_lowercase%%",
+				"host": "dev33-devc"
+		},
+		"collectorsConfigPath": "/tmp",
+		"diamondCollectorsPath": "src/diamond/collectors",
+		"diamondCollectors": ["CPUCollector","PingCollector"],
+		"collectors": ["Test"],
+		"handlers": {
+				"SignalFx": {
+						"authToken": "%%SIGNALFX_AUTH_TOKEN%%",
+						"endpoint": "https://ingest.signalfx.com/v2/datapoint",
+						"interval": 10,
+						"timeout": 2,
+			"collectorBlackList": ["TestCollector1", "TestCollector2"]
+			}
+		}
+}`
+
 var (
-	tmpTestGoodFile, tmpTestBadFile, tempTestCollectorConfig string
+	tmpTestGoodFile, tmpTestGoodEnvvarFile, tmpTestBadFile, tempTestCollectorConfig string
 )
 
 func TestMain(m *testing.M) {
@@ -69,6 +102,12 @@ func TestMain(m *testing.M) {
 	if f, err := ioutil.TempFile("/tmp", "fullerite"); err == nil {
 		f.WriteString(testBadConfiguration)
 		tmpTestBadFile = f.Name()
+		f.Close()
+		defer os.Remove(tmpTestBadFile)
+	}
+	if f, err := ioutil.TempFile("/tmp", "fullerite"); err == nil {
+		f.WriteString(testGoodEnvvarConfiguration)
+		tmpTestGoodEnvvarFile = f.Name()
 		f.Close()
 		defer os.Remove(tmpTestBadFile)
 	}
@@ -159,8 +198,14 @@ func TestGetAsSliceFromJson(t *testing.T) {
 }
 
 func TestParseCollectorConfig(t *testing.T) {
-	_, err := config.ReadCollectorConfig(tempTestCollectorConfig)
+	_ = os.Setenv("COLLECTOR_INTERVAL", "10")
+	ret, err := config.ReadCollectorConfig(tempTestCollectorConfig)
 	assert.Nil(t, err, "should succeed")
+	assert.Equal(t,
+		10.0,
+		ret["interval"],
+		"COLLECTOR_INTERVAL should be interpolated correctly",
+	)
 }
 
 func TestParseGoodConfig(t *testing.T) {
@@ -171,4 +216,81 @@ func TestParseGoodConfig(t *testing.T) {
 func TestParseBadConfig(t *testing.T) {
 	_, err := config.ReadConfig(tmpTestBadFile)
 	assert.NotNil(t, err, "should fail")
+}
+
+func TestParseGoodEnvvarConfig(t *testing.T) {
+	prefixEnv := "prefix"
+	_ = os.Setenv("PREFIX", prefixEnv)
+	authToken := "blah_blah_auth_blah"
+	_ = os.Setenv("SIGNALFX_AUTH_TOKEN", authToken)
+	isNotAffected := "this should not appear"
+	_ = os.Setenv("IS_NOT_AFFECTED", isNotAffected)
+	shouldInterpolate := "yey this got interpolated"
+	_ = os.Setenv("THIS_SHOULD_INTERPOLATE", shouldInterpolate)
+	tooShortEnvvar := "We do not want to accidental short values, eg into qwef1%%TS1%%wwskfe"
+	_ = os.Setenv("TS1", tooShortEnvvar)
+	_ = os.Setenv("TS_1", tooShortEnvvar)
+	noStartWithNumeric := "Why would you want a number at start of envvar"
+	_ = os.Setenv("1MISSISSIPPI", noStartWithNumeric)
+	mustBeUppercase := "By convention, envvars are generally uppercase+numeric+underscore"
+	_ = os.Setenv("this_is_lowercase", mustBeUppercase)
+
+	ret, err := config.ReadConfig(tmpTestGoodEnvvarFile)
+
+	assert.Nil(t, err, "should succeed")
+	assert.Equal(t,
+		prefixEnv,
+		ret.Prefix,
+		"prefix should be interpolated",
+	)
+	assert.Equal(t,
+		authToken,
+		ret.Handlers["SignalFx"]["authToken"],
+		"handler token should be interpolated",
+	)
+	assert.Equal(t,
+		shouldInterpolate,
+		ret.DefaultDimensions["this_should_interpolate"],
+		"dimension should be interpolated",
+	)
+	assert.Equal(t,
+		"%IS_NOT_AFFECTED",
+		ret.DefaultDimensions["test_percent1"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"%IS_NOT_AFFECTED%",
+		ret.DefaultDimensions["test_percent2"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"%%IS_NOT_AFFECTED%",
+		ret.DefaultDimensions["test_percent3"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"%%IS_ALSO_NOT_AFFECTED_BECAUSE_NOT_SET%%",
+		ret.DefaultDimensions["test_percent4"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"asijwef%%TS1%%iwefwewef",
+		ret.DefaultDimensions["test_short_does_not_work1"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"asijwef%%TS_1%%iwefwewef",
+		ret.DefaultDimensions["test_short_does_not_work2"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"%%1MISSISSIPPI%%",
+		ret.DefaultDimensions["test_numeric_start_does_not_work"],
+		"should not be interpolated",
+	)
+	assert.Equal(t,
+		"%%this_is_lowercase%%",
+		ret.DefaultDimensions["test_lowercase_does_not_work"],
+		"should not be interpolated",
+	)
 }

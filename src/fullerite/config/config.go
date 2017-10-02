@@ -3,7 +3,9 @@ package config
 import (
 	"encoding/json"
 	"io/ioutil"
+	"os"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -25,10 +27,27 @@ type Config struct {
 	InternalServerConfig  map[string]interface{}            `json:"internalServer"`
 }
 
+// interpolateEnvvarsIntoConfigRead replaces any values like %%MY_ENVVAR%% with their
+// corresponding environment variable. Limits to min 5 chars, uppercase, must start with
+// letter. Can include underscore and numerics.
+func interpolateEnvvarsIntoConfigRead(configFile string) ([]byte, error) {
+	c, e := ioutil.ReadFile(configFile)
+	re, _ := regexp.Compile("%%[A-Z][A-Z0-9_]{4,}%%")
+	matched := re.FindAll(c, -1)
+	for _, v := range matched {
+		potentialEnvvar := string(v)[2 : len(v)-2] // slice off the lead/trail %%'s
+		if val, ok := os.LookupEnv(potentialEnvvar); ok {
+			re2, _ := regexp.Compile("%%" + potentialEnvvar + "%%")
+			c = re2.ReplaceAllLiteral(c, []byte(val))
+		}
+	}
+	return c, e
+}
+
 // ReadConfig reads a fullerite configuration file
 func ReadConfig(configFile string) (c Config, e error) {
 	log.Info("Reading configuration file at ", configFile)
-	contents, e := ioutil.ReadFile(configFile)
+	contents, e := interpolateEnvvarsIntoConfigRead(configFile)
 	if e != nil {
 		log.Error("Config file error: ", e)
 		return c, e
@@ -44,7 +63,7 @@ func ReadConfig(configFile string) (c Config, e error) {
 // ReadCollectorConfig reads a fullerite collector configuration file
 func ReadCollectorConfig(configFile string) (c map[string]interface{}, e error) {
 	log.Info("Reading collector configuration file at ", configFile)
-	contents, e := ioutil.ReadFile(configFile)
+	contents, e := interpolateEnvvarsIntoConfigRead(configFile)
 	if e != nil {
 		log.Error("Config file error: ", e)
 		return c, e
